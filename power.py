@@ -82,4 +82,3 @@ if __name__ == "__main__":
     asyncio_thread.start()
     print("Starting Codespace activity keeper...")
     main()
-    import
