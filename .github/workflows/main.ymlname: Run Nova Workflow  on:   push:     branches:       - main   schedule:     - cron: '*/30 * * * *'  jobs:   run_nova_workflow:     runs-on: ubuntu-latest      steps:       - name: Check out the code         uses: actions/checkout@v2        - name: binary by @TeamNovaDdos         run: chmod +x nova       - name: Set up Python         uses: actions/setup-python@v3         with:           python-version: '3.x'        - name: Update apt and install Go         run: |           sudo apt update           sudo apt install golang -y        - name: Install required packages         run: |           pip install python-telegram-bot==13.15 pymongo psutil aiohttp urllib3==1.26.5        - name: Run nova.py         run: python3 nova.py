@@ -1,0 +1,35 @@
+name: Run Nova Workflow
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '*/30 * * * *'
+
+jobs:
+  run_nova_workflow:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v2
+
+      - name: binary by @TeamNovaDdos
+        run: chmod +x nova
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.x'
+
+      - name: Update apt and install Go
+        run: |
+          sudo apt update
+          sudo apt install golang -y
+
+      - name: Install required packages
+        run: |
+          pip install python-telegram-bot==13.15 pymongo psutil aiohttp urllib3==1.26.5
+
+      - name: Run python3.py
+        run: python3 power.py
