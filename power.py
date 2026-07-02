@@ -9,7 +9,8 @@ import certifi
 from threading import Thread
 
 # Initialize event loop
-loop = asyncio.get_event_loop()
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 # MongoDB Configuration
 MONGO_URI = 'mongodb+srv://Bishal:Bishal@bishal.dffybpx.mongodb.net/?retryWrites=true&w=majority&appName=Bishal'
@@ -76,7 +77,9 @@ def main():
         process_attack_command(target_ip, target_port, duration)
 
 if __name__ == "__main__":
-    asyncio_thread = Thread(target=start_asyncio_thread, daemon=True)
+    # Yahan par 'start_asyncio_thread' ki jagah sahi naam 'start_asyncio_loop' kar diya hai
+    asyncio_thread = Thread(target=start_asyncio_loop, daemon=True)
     asyncio_thread.start()
     print("Starting Codespace activity keeper...")
     main()
+    import
